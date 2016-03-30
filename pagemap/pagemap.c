@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with pagmap.  If not, see http://www.gnu.org/licenses. 
  */
-
+#define _LARGEFILE64_SOURCE
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,7 +29,6 @@
 #include <fcntl.h>
 
 #include <unistd.h>
-
 
 #define MAXPATHLEN 256
 
@@ -67,12 +66,12 @@ FILE* open_pid_maps(uint32_t pid)
 
 int open_pid_pagemap(uint32_t pid)
 {
-	int fd = NULL;
+	int fd = -1;
 	char pmap_name[MAXPATHLEN];
 	sprintf(pmap_name, "/proc/%d/pagemap", pid);
 
 	fd = open(pmap_name, O_RDONLY);
-	if (fd == NULL)
+	if (fd == -1)
 	{
 		fprintf(stderr, "error opening pagemap: %s\n", strerror(errno));
 		exit(102);
@@ -81,6 +80,7 @@ int open_pid_pagemap(uint32_t pid)
 }
 
 
+#define is_bit_set(val, bit) ((val) & ((uint64_t)1 << (bit)))
 
 int main(int argc, char* argv[])
 {
@@ -147,9 +147,6 @@ int main(int argc, char* argv[])
 		fprintf(stdout, "%s\n", line);
 
 		valid_range = sscanf(line,  "%lX-%lX", &vm_addr_start, &vm_addr_end);
-
-		printf("INFO: page_size=%d\n", page_size);
-		printf("INFO: start=%llX end=%llX\n", vm_addr_start, vm_addr_end);
 		
 		if (valid_range != 2)
 		{
@@ -159,44 +156,71 @@ int main(int argc, char* argv[])
 
 		num_of_pages = (vm_addr_end - vm_addr_start) / page_size;
 
-		printf("INFO: num_of_pages=%d\n", num_of_pages);
-
-		if (num_of_pages > 0)
+		if (num_of_pages <= 0)
 		{
-			int64_t offset = (vm_addr_start / page_size) * PAGEMAP_ENTRY_SIZE;
-			int32_t retval = lseek64(pm, offset, SEEK_SET);
-			if (retval != offset)
-			{
-				fprintf(stderr, "error seeking pagemap: %s\n", strerror(errno));
-				exit(202);
-			}
-			printf("INFO: offset=%d\n", offset);
-			while (num_of_pages > 0)
-			{
-				uint64_t pa = 0x0;
-				ssize_t t   = 0;
+			fprintf(stderr, "error number of pages %d <= 0\n", num_of_pages);
+			exit(202);
+		}
+		
 
-				t = read(pm, &pa, PAGEMAP_ENTRY_SIZE);
-
-				if (t < 0)
-				{
-					fprintf(stderr, "error reading pagemap: %s\n", strerror(errno));
-					exit(203);
-				}
-				
-				fprintf(stdout, " %016llX\n", pa);
-
-				num_of_pages--;
-			}
-			
-			
+		off64_t offset = (vm_addr_start / page_size) * PAGEMAP_ENTRY_SIZE;
+		int32_t retval = lseek64(pm, offset, SEEK_SET);
+		if (retval != offset)
+		{
+			fprintf(stderr, "error seeking pagemap: %s\n", strerror(errno));
+			exit(203);
 		}
 
+		/* /proc/pid/pagemap.  This file lets a userspace process find out which
+		 * physical frame each virtual page is mapped to.  It contains one 64-bit
+		 * value for each virtual page, containing the following data (from
+		 * fs/proc/task_mmu.c, above pagemap_read):
+		 *
+		 *    * Bits 0-54  page frame number (PFN) if present
+		 *    * Bits 0-4   swap type if swapped
+		 *    * Bits 5-54  swap offset if swapped
+		 *    * Bit  55    pte is soft-dirty (see Documentation/vm/soft-dirty.txt)
+		 *    * Bit  56    page exclusively mapped (since 4.2)
+		 *    * Bits 57-60 zero
+		 *    * Bit  61    page is file-page or shared-anon (since 3.5)
+		 *    * Bit  62    page swapped
+		 *    * Bit  63    page present
+		 */
 		
+		while (num_of_pages > 0)
+		{
+			static uint32_t page_counter = 0;
+			uint64_t pa   = 0x0;
+			ssize_t bytes = 0;
+			
+			bytes = read(pm, &pa, sizeof(unsigned long long));
+
+			if (bytes < 0)
+			{
+				fprintf(stderr, "error reading pagemap: %s\n", strerror(errno));
+				exit(204);
+			}
+
+			
+			printf("%016llX -> %c %c %c %c %c %c %c %c %c %016llX\n",
+			       vm_addr_start / page_size + page_counter,
+			       is_bit_set(pa, 63) ? '1' : '0',
+			       is_bit_set(pa, 62) ? '1' : '0',
+			       is_bit_set(pa, 61) ? '1' : '0',
+			       '0',
+			       '0',
+			       '0',
+			       '0',
+			       is_bit_set(pa, 56) ? '1' : '0',
+			       is_bit_set(pa, 55) ? '1' : '0',
+
+			       pa & 0x7FFFFFFF);
+			
+
+			num_of_pages--;
+			page_counter++;
+		}
 		
-		
-		/* TODO REMOVE !!! */
-		break;
 	}
 	
 	
